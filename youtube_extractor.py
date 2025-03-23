@@ -73,45 +73,114 @@ class YouTubeExtractor:
             
             # 使用yt-dlp下载音频
             print(f"正在下载视频音频: {self.video_url}")
-            yt_dlp_command = [
-                "yt-dlp", 
-                "-x", 
-                "--audio-format", "mp3", 
-                "--audio-quality", "0",
-                "-o", audio_path,
+            
+            # 首先检查ffmpeg是否已安装
+            try:
+                subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except (subprocess.SubprocessError, FileNotFoundError):
+                print("错误: ffmpeg未安装。请安装ffmpeg后再试。")
+                print("在Mac上，可以使用以下命令安装: brew install ffmpeg")
+                return "无法处理音频：缺少ffmpeg。请安装后再试。"
+            
+            # 分两步下载和转换，避免一步出错
+            download_command = [
+                "yt-dlp",
+                "-f", "bestaudio",
+                "-o", f"{output_dir}/{self.video_id}.%(ext)s",
                 self.video_url
             ]
-            subprocess.run(yt_dlp_command, check=True)
+            
+            try:
+                print("第1步：下载音频...")
+                subprocess.run(download_command, check=True)
+                
+                # 找到下载的音频文件
+                files = os.listdir(output_dir)
+                audio_files = [f for f in files if f.startswith(self.video_id) and f != f"{self.video_id}.mp3"]
+                
+                if not audio_files:
+                    raise FileNotFoundError("下载文件未找到")
+                    
+                downloaded_file = os.path.join(output_dir, audio_files[0])
+                
+                # 转换为mp3
+                print("第2步：转换为MP3格式...")
+                convert_command = [
+                    "ffmpeg", 
+                    "-i", downloaded_file,
+                    "-q:a", "0",
+                    "-map", "a",
+                    audio_path,
+                    "-y"
+                ]
+                subprocess.run(convert_command, check=True)
+                
+                # 删除原始下载文件
+                os.remove(downloaded_file)
+                
+            except subprocess.CalledProcessError as e:
+                print(f"命令执行失败: {e}")
+                # 尝试直接下载为mp3
+                fallback_command = [
+                    "yt-dlp",
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    "--audio-quality", "0",
+                    "-o", audio_path,
+                    self.video_url
+                ]
+                print("尝试备用下载方法...")
+                subprocess.run(fallback_command, check=True)
 
             if not os.path.exists(audio_path):
-                raise FileNotFoundError(f"下载失败: {audio_path}")
+                raise FileNotFoundError(f"下载失败，无法找到文件: {audio_path}")
             
             # 使用Whisper进行转录
             print("正在使用Whisper转录音频...")
             transcript_path = os.path.join(output_dir, f"{self.video_id}.txt")
             
-            # 使用Whisper命令行工具 (需要先安装whisper)
+            # 使用Whisper命令行工具
             whisper_command = [
                 "whisper", 
                 audio_path, 
-                "--model", "medium",  # 使用最小的模型以节省资源，可选择 tiny, base, small, medium, large
+                "--model", "medium",  # 使用medium模型提高精度
                 "--language", "auto",  # 自动检测语言
                 "--output_dir", output_dir,
                 "--output_format", "txt"
             ]
-            subprocess.run(whisper_command, check=True)
             
+            try:
+                subprocess.run(whisper_command, check=True)
+            except (subprocess.SubprocessError, FileNotFoundError) as e:
+                print(f"Whisper转录失败: {e}")
+                # 如果whisper命令行失败，尝试使用Python API
+                print("尝试使用Whisper Python API...")
+                try:
+                    import whisper
+                    model = whisper.load_model("medium")
+                    result = model.transcribe(audio_path)
+                    transcript_text = result["text"]
+                    
+                    # 手动保存结果
+                    with open(transcript_path, 'w', encoding='utf-8') as f:
+                        f.write(transcript_text)
+                except Exception as e2:
+                    print(f"Whisper Python API也失败了: {e2}")
+                    return "音频转录失败。"
+                
             # 读取转录文本
-            transcript_path = os.path.join(output_dir, f"{self.video_id}.txt")
-            with open(transcript_path, 'r', encoding='utf-8') as f:
-                transcript_text = f.read()
-            
-            self.transcript = transcript_text
-            return transcript_text
-            
+            if os.path.exists(transcript_path):
+                with open(transcript_path, 'r', encoding='utf-8') as f:
+                    transcript_text = f.read()
+                
+                self.transcript = transcript_text
+                return transcript_text
+            else:
+                return "转录完成，但找不到输出文件。"
+                
         except Exception as e:
             print(f"下载和转录过程中出错: {str(e)}")
-            return ""
+            return f"处理失败: {str(e)}"
 
     def analyze_with_local_llm(self, prompt: str) -> str:
         """使用本地LLM分析字幕内容（示例使用ollama）"""
